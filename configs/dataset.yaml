@@ -1,0 +1,6 @@
+path: "C:/Users/Radziulek/Desktop/Studia/_STUDIA II STOPNIA/SEMESTR I/Zaawansowane programowanie/anpr_project/data/yolo"
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: plate

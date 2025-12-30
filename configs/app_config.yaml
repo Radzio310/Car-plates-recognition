@@ -1,0 +1,30 @@
+detector:
+  # heuristic = działa bez trenowania (demo/synthetic)
+  # yolo      = docelowo po treningu na Kaggle
+  type: "yolo"
+
+  # --- heuristic params ---
+  min_area_ratio: 0.002
+  max_area_ratio: 0.20
+  aspect_min: 2.0
+  aspect_max: 6.5
+
+  # --- yolo params (używane gdy type=yolo) ---
+  weights: "runs/detect/plate/weights/best.pt"   # podmień po treningu
+  conf: 0.25
+  iou: 0.45
+  img_size: 640
+
+ocr:
+  engine: "easyocr"   # easyocr | tesseract
+  languages: ["en"]   # dla easyocr (pierwsze uruchomienie pobierze modele)
+  tesseract_lang: "eng"
+
+postprocess:
+  uppercase: true
+  strip_spaces: true
+  allowed_chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  plate_regex: "^[A-Z]{1,3}[A-Z0-9]{4,5}$"
+
+access_control:
+  sqlite_path: "data/plates.db"
