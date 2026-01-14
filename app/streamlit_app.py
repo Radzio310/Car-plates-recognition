@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from contextlib import contextmanager
 from textwrap import dedent
+from ultralytics import YOLO
 
 import numpy as np
 import streamlit as st
@@ -22,6 +23,8 @@ if str(ROOT) not in sys.path:
 from anpr.pipeline import ANPRPipeline
 from anpr.utils import normalize_plate, validate_plate
 
+EMERGENCY_MODEL_PATH = Path("runs/train/emergency_classification_v2/weights/best.pt")
+EMERGENCY_THRESHOLD = 0.60  # możesz zmienić
 
 # =========================================================
 # CONFIG / PAGE
@@ -421,6 +424,33 @@ st.markdown(APP_CSS, unsafe_allow_html=True)
 # =========================================================
 
 @st.cache_resource
+def load_emergency_model_cached(model_path: str) -> YOLO:
+    return YOLO(model_path)
+
+def predict_emergency_on_rgb(img_rgb: np.ndarray) -> tuple[bool, float, str]:
+    """
+    Returns:
+      is_emergency (bool),
+      confidence (float),
+      predicted_class_name (str)
+    """
+    if not EMERGENCY_MODEL_PATH.exists():
+        return False, 0.0, "model_missing"
+
+    model = load_emergency_model_cached(str(EMERGENCY_MODEL_PATH))
+
+    # Ultralytics działa na RGB ok, ale przyjmie też np. ndarray
+    r = model.predict(source=img_rgb, verbose=False)[0]
+
+    pred_idx = int(r.probs.top1)
+    conf = float(r.probs.top1conf)
+    pred_name = r.names[pred_idx]  # np. "emergency" / "non_emergency"
+
+    is_emergency = (pred_name == "emergency" and conf >= EMERGENCY_THRESHOLD)
+    return is_emergency, conf, pred_name
+
+
+@st.cache_resource
 def load_pipeline_cached(config_path: str) -> ANPRPipeline:
     return ANPRPipeline(config_path=config_path)
 
@@ -599,13 +629,41 @@ def gate_model(access_granted: Optional[bool], plate: str, valid: bool, detected
     return: (state_class, label, subtitle)
     state_class: idle/open/closed
     """
+
     if not detected:
-        return "idle", "Brama: BRAK DANYCH", "Nie wykryto tablicy – system nie podejmuje decyzji."
+        return (
+            "idle",
+            "Brama: BRAK DANYCH",
+            "Nie wykryto pojazdu – system nie podejmuje decyzji."
+        )
+
+    # 🚑 POJAZD UPRZYWILEJOWANY
+    if plate == "EMERGENCY" and access_granted is True:
+        return (
+            "open",
+            "Brama: OTWARTA",
+            "🚑 Pojazd uprzywilejowany – brama otwarta automatycznie."
+        )
+
     if not valid or not plate:
-        return "idle", "Brama: BRAK DECYZJI", "Tablica wykryta, ale odczyt jest niepewny / niepełny – nie otwieramy."
+        return (
+            "idle",
+            "Brama: BRAK DECYZJI",
+            "Tablica wykryta, ale odczyt jest niepewny / niepełny – nie otwieramy."
+        )
+
     if access_granted is True:
-        return "open", "Brama: OTWARTA", "Numer jest na liście zaufanych – wjazd dozwolony."
-    return "closed", "Brama: ZAMKNIĘTA", "Numer nie jest na liście zaufanych – wjazd zablokowany."
+        return (
+            "open",
+            "Brama: OTWARTA",
+            "Numer jest na liście zaufanych – wjazd dozwolony."
+        )
+
+    return (
+        "closed",
+        "Brama: ZAMKNIĘTA",
+        "Numer nie jest na liście zaufanych – wjazd zablokowany."
+    )
 
 def render_gate(access_granted: Optional[bool], plate: str, valid: bool, detected: bool, animate: bool) -> None:
     state, label, subtitle = gate_model(access_granted, plate, valid, detected)
@@ -792,9 +850,46 @@ plate_regex = getattr(pipeline, "plate_regex", "^[A-Z]{1,3}[A-Z0-9]{4,5}$")
 # =========================================================
 
 def run_pipeline_on_rgb(img_rgb: np.ndarray) -> None:
+    # 0) najpierw emergency classifier
+    with fullscreen_loader("Analizuję zdjęcie…", "Sprawdzam czy to pojazd uprzywilejowany (emergency)."):
+        is_emg, emg_conf, emg_name = predict_emergency_on_rgb(img_rgb)
+
+    # Jeśli EMERGENCY -> otwieramy bramę i NIE sprawdzamy tablicy
+    if is_emg:
+        class DummyResult:
+            detected = True
+            bbox = None
+            plate_text_raw = ""
+            plate_text_norm = "EMERGENCY"
+            plate_valid_format = True
+            access_granted = True
+            ocr_conf = emg_conf
+            error = None
+            timing_ms = {
+                "emergency_cls_conf": emg_conf,
+                "emergency_cls_name": emg_name,
+            }
+
+            is_emergency_vehicle = True
+
+        out = DummyResult()
+        st.session_state.last_result = out
+        st.session_state.last_image_rgb = img_rgb
+        st.session_state.last_crop_rgb = None
+        st.session_state.analysis_just_finished = True
+        return
+
+    # 1) jeśli nie emergency -> normalny ANPR pipeline
     img_bgr = img_rgb[:, :, ::-1].copy()
     with fullscreen_loader("Analizuję zdjęcie…", "Wykrywam tablicę i odczytuję numer rejestracyjny."):
         out = pipeline.run(img_bgr)
+
+    # (opcjonalnie) dopisz info o emergency-predykcji do wyniku
+    try:
+        out.timing_ms = dict(getattr(out, "timing_ms", {}) or {})
+        out.timing_ms.update({"emergency_cls_conf": emg_conf, "emergency_cls_name": emg_name})
+    except Exception:
+        pass
 
     st.session_state.last_result = out
     st.session_state.last_image_rgb = img_rgb
