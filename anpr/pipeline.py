@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import time
 
 import cv2
@@ -12,7 +12,6 @@ from .detector_heuristic import HeuristicPlateDetector, HeuristicDetectorConfig
 from .ocr import make_ocr_engine
 from .db import PlateDB
 from .utils import normalize_plate, validate_plate, BBox
-
 
 @dataclass
 class PipelineOutput:
@@ -26,13 +25,12 @@ class PipelineOutput:
     error: Optional[str]
     timing_ms: Dict[str, float]
 
-
 class ANPRPipeline:
     def __init__(self, config_path: str = "configs/app_config.yaml"):
         with open(config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
+            cfg = yaml.safe_load(f)
 
-        det_cfg = cfg.get("detector", {}) or {}
+        det_cfg = cfg.get("detector", {})
         det_type = (det_cfg.get("type") or "heuristic").lower().strip()
 
         if det_type == "yolo":
@@ -56,40 +54,26 @@ class ANPRPipeline:
         else:
             raise ValueError(f"Unsupported detector.type: {det_type}. Use yolo or heuristic.")
 
-        ocr_cfg = cfg.get("ocr", {}) or {}
-
-        fast_cfg = ocr_cfg.get("fast", {})
-        if not isinstance(fast_cfg, dict):
-            fast_cfg = {}
-
-        fast_try_psm8 = bool(fast_cfg.get("try_psm8", True))
-        fast_cut_blue_auto = bool(fast_cfg.get("cut_blue_auto", False))
-        fast_resize_fx = float(fast_cfg.get("resize_fx", 2.1))
-        fast_oem = int(fast_cfg.get("oem", 3))
-
+        ocr_cfg = cfg.get("ocr", {})
         self.ocr = make_ocr_engine(
             engine=ocr_cfg.get("engine", "easyocr"),
             languages=ocr_cfg.get("languages", ["en"]),
             tesseract_lang=ocr_cfg.get("tesseract_lang", "eng"),
-            fast_try_psm8=fast_try_psm8,
-            fast_cut_blue_auto=fast_cut_blue_auto,
-            fast_resize_fx=fast_resize_fx,
-            fast_oem=fast_oem,
         )
 
-        pp = cfg.get("postprocess", {}) or {}
+        pp = cfg.get("postprocess", {})
         self.allowed_chars = pp.get("allowed_chars", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
         self.uppercase = bool(pp.get("uppercase", True))
         self.strip_spaces = bool(pp.get("strip_spaces", True))
         self.plate_regex = pp.get("plate_regex", "^[A-Z]{1,3}[A-Z0-9]{4,5}$")
 
-        db_path = (cfg.get("access_control", {}) or {}).get("sqlite_path", "data/plates.db")
+        db_path = cfg.get("access_control", {}).get("sqlite_path", "data/plates.db")
         self.db = PlateDB(path=db_path)
 
-        # KLUCZ: domyślnie tight-crop jak w demo
-        crop_cfg = cfg.get("crop", {}) or {}
-        self.pad_x_ratio = float(crop_cfg.get("pad_x_ratio", 0.0))
-        self.pad_y_ratio = float(crop_cfg.get("pad_y_ratio", 0.0))
+        # Padding bbox (żeby OCR nie tracił pierwszych znaków)
+        pad_cfg = cfg.get("crop", {})
+        self.pad_x_ratio = float(pad_cfg.get("pad_x_ratio", 0.08))  # 8% szerokości bbox
+        self.pad_y_ratio = float(pad_cfg.get("pad_y_ratio", 0.15))  # 15% wysokości bbox
 
     def run(self, image_bgr: np.ndarray) -> PipelineOutput:
         t0 = time.perf_counter()
@@ -116,19 +100,15 @@ class ANPRPipeline:
         bw = max(1, x2 - x1)
         bh = max(1, y2 - y1)
 
-        padx = int(max(0.0, self.pad_x_ratio) * bw)
-        pady = int(max(0.0, self.pad_y_ratio) * bh)
+        padx = int(self.pad_x_ratio * bw)
+        pady = int(self.pad_y_ratio * bh)
 
         x1p = max(0, x1 - padx)
         y1p = max(0, y1 - pady)
-        x2p = min(W, x2 + padx)
-        y2p = min(H, y2 + pady)
+        x2p = min(W - 1, x2 + padx)
+        y2p = min(H - 1, y2 + pady)
 
-        # UWAGA: slice jest [y1:y2), więc x2p/y2p mogą być równe W/H
-        if x2p <= x1p or y2p <= y1p:
-            crop = image_bgr[y1:y2, x1:x2].copy()
-        else:
-            crop = image_bgr[y1p:y2p, x1p:x2p].copy()
+        crop = image_bgr[y1p:y2p, x1p:x2p].copy()
 
         t2 = time.perf_counter()
         ocr_res = self.ocr.read(crop)
@@ -161,7 +141,7 @@ class ANPRPipeline:
             ocr_conf=float(ocr_res.confidence),
             detected=True,
             bbox=best.bbox,
-            access_granted=access,
+            access_granted=access,  # None jeśli nie sprawdzano
             error=err,
             timing_ms={
                 "detect": (t1 - t0) * 1000.0,
