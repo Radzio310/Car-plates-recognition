@@ -1,3 +1,7 @@
+# ==============================
+# ANPR + Emergency Vehicles Stack
+# ==============================
+
 # Core
 numpy>=1.24
 opencv-python>=4.8
@@ -5,16 +9,21 @@ pillow>=10.0
 pyyaml>=6.0
 tqdm>=4.66
 
+# Data processing
+pandas>=2.0
+
 # UI
 streamlit>=1.33
 
-# Detection (YOLOv8)
+# Detection / Classification (YOLOv8)
 ultralytics>=8.2.0
 
 # OCR engines (choose one; both optional)
 easyocr>=1.7.1
 pytesseract>=0.3.10
 
-# Metrics
+# Metrics / evaluation
 scikit-learn>=1.3
-kaggle
+
+# Dataset download (Kaggle API)
+kaggle>=1.6.0
