@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import re
 import sys
+import json
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -29,10 +30,72 @@ from anpr.utils import normalize_plate, validate_plate
 
 
 # =========================================================
-# EMERGENCY CLS CONFIG
+# EMERGENCY CLS CONFIG (ADMIN-CONFIGURABLE)
 # =========================================================
 
-EMERGENCY_THRESHOLD = 0.80  # ustaw próg dla "emergency"
+DEFAULT_EMERGENCY_THRESHOLD = 0.80  # fallback gdy brak ustawienia
+EMERGENCY_SETTINGS_PATH = ROOT / "data" / "emergency_settings.json"
+
+
+def _load_emergency_settings() -> dict:
+    """
+    Czyta ustawienia emergency z pliku JSON.
+    Struktura:
+      { "emergency_threshold": 0.80 }
+    """
+    try:
+        if EMERGENCY_SETTINGS_PATH.exists():
+            with open(EMERGENCY_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_emergency_settings(data: dict) -> None:
+    EMERGENCY_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(EMERGENCY_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_emergency_threshold() -> float:
+    """
+    Zwraca próg (float 0..1). Jeśli brak w pliku lub błędny – zwraca DEFAULT.
+    """
+    data = _load_emergency_settings()
+    v = data.get("emergency_threshold", DEFAULT_EMERGENCY_THRESHOLD)
+    try:
+        v = float(v)
+    except Exception:
+        v = DEFAULT_EMERGENCY_THRESHOLD
+
+    # clamp bezpieczeństwa
+    if v < 0.50:
+        v = 0.50
+    if v > 0.99:
+        v = 0.99
+    return v
+
+
+def save_emergency_threshold(v: float) -> None:
+    """
+    Zapisuje próg (float 0..1) do JSON.
+    """
+    try:
+        v = float(v)
+    except Exception:
+        v = DEFAULT_EMERGENCY_THRESHOLD
+
+    if v < 0.50:
+        v = 0.50
+    if v > 0.99:
+        v = 0.99
+
+    data = _load_emergency_settings()
+    data["emergency_threshold"] = v
+    _save_emergency_settings(data)
 
 
 def _find_emergency_model_path() -> Optional[Path]:
@@ -463,7 +526,6 @@ APP_JS_COMPONENT = dedent(
         if(!P) return;
 
         function getScrollRoot(){
-          // Streamlit zwykle scrolluje tu:
           const candidates = [
             P.document.querySelector('[data-testid="stAppViewContainer"]'),
             P.document.querySelector('[data-testid="stMain"]'),
@@ -473,7 +535,6 @@ APP_JS_COMPONENT = dedent(
             P.document.body
           ].filter(Boolean);
 
-          // wybierz pierwszy, który realnie jest scrollowalny
           for (const el of candidates){
             try{
               const cs = P.getComputedStyle(el);
@@ -483,18 +544,28 @@ APP_JS_COMPONENT = dedent(
             } catch(_) {}
           }
 
-          // fallback
           return P.document.scrollingElement || P.document.documentElement;
         }
 
-        function scrollToAnchor(anchorId){
+        function isAtOrBelowResults(anchorEl){
+          const rect = anchorEl.getBoundingClientRect();
+          return rect.top <= 80;
+        }
+
+        function setFabHidden(fabWrap, hidden){
+          if(!fabWrap) return;
+          if(hidden) fabWrap.classList.add('fabHidden');
+          else fabWrap.classList.remove('fabHidden');
+        }
+
+        function scrollToAnchorIfNeeded(anchorId){
           const el = P.document.getElementById(anchorId);
           if(!el) return;
-          // działa i na window-scroll i na kontenerze streamlit
+          if(isAtOrBelowResults(el)) return;
+
           try{
             el.scrollIntoView({ behavior: 'smooth', block: 'start' });
           } catch(_) {
-            // bardzo stary fallback
             const root = getScrollRoot();
             const r = el.getBoundingClientRect();
             const top = (root.scrollTop || 0) + r.top - 10;
@@ -510,7 +581,9 @@ APP_JS_COMPONENT = dedent(
 
           const onClick = (e) => {
             try{ e.preventDefault(); } catch(_) {}
-            scrollToAnchor('results_anchor');
+            const anchor = P.document.getElementById('results_anchor');
+            if(anchor && isAtOrBelowResults(anchor)) return;
+            scrollToAnchorIfNeeded('results_anchor');
           };
 
           fab.addEventListener('click', onClick);
@@ -522,52 +595,81 @@ APP_JS_COMPONENT = dedent(
           return true;
         }
 
-        function observeResults(){
+        function attachVisibilityLogic(){
           const anchor = P.document.getElementById('results_anchor');
           const fabWrap = P.document.getElementById('fabResultsWrap');
           if(!anchor || !fabWrap) return false;
 
-          if(P.__anprObsAttached) return true;
-          P.__anprObsAttached = true;
-
           const root = getScrollRoot();
-          const Obs = P.IntersectionObserver;
-          if(!Obs) return false;
+          const S = P.__anprFabState || (P.__anprFabState = {});
 
-          const obs = new Obs((entries)=>{
-          const e = entries && entries[0];
-          if(!e) return;
-        
-          // rect.top:
-          //  > 0  => anchor jest poniżej górnej krawędzi widoku (czyli jesteś WYŻEJ niż wyniki)
-          // <= 0  => anchor jest na górze lub nad widokiem (czyli jesteś NA/PONIŻEJ wyniku)
-          const rect = anchor.getBoundingClientRect();
-          const reachedOrPassed = rect.top <= 10; // margines 10px
-        
-          if(e.isIntersecting || reachedOrPassed){
-            fabWrap.classList.add('fabHidden');
-          } else {
-            fabWrap.classList.remove('fabHidden');
+          const same =
+            S.anchor === anchor &&
+            S.fabWrap === fabWrap &&
+            S.root === root;
+
+          if(!same){
+            if(S.obs){
+              try{ S.obs.disconnect(); } catch(_) {}
+              S.obs = null;
+            }
+            if(S.onScroll && S.root){
+              try{ S.root.removeEventListener('scroll', S.onScroll); } catch(_) {}
+            }
+            if(S.onWinScroll){
+              try{ P.removeEventListener('scroll', S.onWinScroll); } catch(_) {}
+            }
+            S.onScroll = null;
+            S.onWinScroll = null;
           }
-        }, {
-          root: root === P.document.documentElement ? null : root,
-          threshold: 0.15
-        });
 
+          let raf = 0;
+          const update = () => {
+            raf = 0;
+            const hide = isAtOrBelowResults(anchor);
+            setFabHidden(fabWrap, hide);
+          };
+          const schedule = () => {
+            if(raf) return;
+            raf = P.requestAnimationFrame(update);
+          };
 
-          obs.observe(anchor);
+          if(!same){
+            const onScroll = () => schedule();
+
+            try{ root.addEventListener('scroll', onScroll, { passive:true }); }
+            catch(_){ root.addEventListener('scroll', onScroll); }
+
+            try{ P.addEventListener('scroll', onScroll, { passive:true }); }
+            catch(_){ P.addEventListener('scroll', onScroll); }
+
+            if(P.IntersectionObserver){
+              const obs = new P.IntersectionObserver(() => schedule(), {
+                root: root === P.document.documentElement ? null : root,
+                threshold: [0, 0.01, 0.1],
+                rootMargin: "0px 0px -70% 0px"
+              });
+              try{ obs.observe(anchor); } catch(_) {}
+              S.obs = obs;
+            }
+
+            S.root = root;
+            S.anchor = anchor;
+            S.fabWrap = fabWrap;
+            S.onScroll = onScroll;
+            S.onWinScroll = onScroll;
+          }
+
+          update();
           return true;
         }
 
         function ensure(){
           wireFab();
-          observeResults();
+          attachVisibilityLogic();
         }
 
-        // 1) od razu
         ensure();
-
-        // 2) i przy każdej przebudowie DOM Streamlit
         const mo = new P.MutationObserver(()=>ensure());
         mo.observe(P.document.body, { childList:true, subtree:true });
 
@@ -578,7 +680,6 @@ APP_JS_COMPONENT = dedent(
 """
 )
 
-# Wstrzyknięcie JS (bez UI)
 components.html(APP_JS_COMPONENT, height=1, width=1)
 
 
@@ -610,9 +711,10 @@ def predict_emergency_on_rgb(img_rgb: np.ndarray) -> tuple[bool, float, str]:
 
     pred_idx = int(r.probs.top1)
     conf = float(r.probs.top1conf)
-    pred_name = r.names[pred_idx]  # "emergency" / "non_emergency"
+    pred_name = r.names[pred_idx]
 
-    is_emergency = (pred_name == "emergency" and conf >= EMERGENCY_THRESHOLD)
+    thr = float(st.session_state.get("emergency_threshold", DEFAULT_EMERGENCY_THRESHOLD))
+    is_emergency = (pred_name == "emergency" and conf >= thr)
     return is_emergency, conf, pred_name
 
 
@@ -645,11 +747,6 @@ def _sqlite_conn(db_path: str) -> sqlite3.Connection:
 
 
 def _run_db_manage(args: List[str], db_path: Optional[str] = None) -> subprocess.CompletedProcess:
-    """
-    Dokładnie jak w konsoli:
-      python -m scripts.db_manage add --plate "SK12345"
-    + próbujemy dopiąć --db <path> jeśli skrypt wspiera.
-    """
     base = [sys.executable, "-m", "scripts.db_manage"]
 
     if db_path:
@@ -934,6 +1031,12 @@ if "analysis_just_finished" not in st.session_state:
 if "admin_recent_add" not in st.session_state:
     st.session_state.admin_recent_add = ""
 
+if "emergency_threshold" not in st.session_state:
+    st.session_state.emergency_threshold = load_emergency_threshold()
+
+if "emergency_threshold_dirty" not in st.session_state:
+    st.session_state.emergency_threshold_dirty = False
+
 
 # =========================================================
 # SIDEBAR
@@ -968,10 +1071,54 @@ with st.sidebar:
             help="W trybie użytkownika konfiguracja jest zablokowana.",
         )
         st.caption("Konfigurację może zmieniać administrator.")
+        thr_pct = int(round(float(st.session_state.emergency_threshold) * 100))
+        st.slider(
+            "Próg rozpoznawania pojazdu uprzywilejowanego",
+            min_value=50,
+            max_value=99,
+            value=thr_pct,
+            step=1,
+            disabled=True,
+            help="Ustawienie tylko dla administratora.",
+        )
+        st.caption(f"Aktualnie: {thr_pct}%")
     else:
         new_cfg = st.text_input("Ścieżka do configu (YAML)", value=st.session_state.cfg_path)
         if new_cfg.strip() and new_cfg.strip() != st.session_state.cfg_path:
             st.session_state.cfg_path = new_cfg.strip()
+        st.markdown("<div class='hrSoft'></div>", unsafe_allow_html=True)
+        st.markdown("#### Pojazdy uprzywilejowane (próg)")
+
+        current_pct = int(round(float(st.session_state.emergency_threshold) * 100))
+        new_pct = st.slider(
+            "Próg pewności klasyfikacji 'emergency'",
+            min_value=50,
+            max_value=99,
+            value=current_pct,
+            step=1,
+            help="Im wyżej, tym trudniej o wykrycie pojazdu uprzywilejowanego (mniej fałszywych trafień).",
+        )
+
+        new_thr = float(new_pct) / 100.0
+        if abs(new_thr - float(st.session_state.emergency_threshold)) > 1e-9:
+            st.session_state.emergency_threshold = new_thr
+            st.session_state.emergency_threshold_dirty = True
+
+        cols_thr = st.columns([1, 1], gap="small")
+        with cols_thr[0]:
+            if st.button("Zapisz próg", use_container_width=True):
+                try:
+                    save_emergency_threshold(float(st.session_state.emergency_threshold))
+                    st.session_state.emergency_threshold_dirty = False
+                    st.success(f"Zapisano próg: {int(round(st.session_state.emergency_threshold * 100))}%")
+                except Exception as e:
+                    st.error(f"Nie udało się zapisać progu: {e}")
+
+        with cols_thr[1]:
+            if st.session_state.emergency_threshold_dirty:
+                st.markdown("<div class='badge warn'>Niezapisane zmiany</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div class='badge ok'>Zapisane</div>", unsafe_allow_html=True)
 
         if st.button("Przeładuj pipeline", use_container_width=True):
             load_pipeline_cached.clear()  # type: ignore[attr-defined]
@@ -1027,6 +1174,7 @@ def run_pipeline_on_rgb(img_rgb: np.ndarray) -> None:
             timing_ms = {
                 "emergency_cls_conf": emg_conf,
                 "emergency_cls_name": emg_name,
+                "emergency_threshold": float(st.session_state.get("emergency_threshold", DEFAULT_EMERGENCY_THRESHOLD)),
             }
             is_emergency_vehicle = True
 
@@ -1044,7 +1192,11 @@ def run_pipeline_on_rgb(img_rgb: np.ndarray) -> None:
     try:
         out.is_emergency_vehicle = False
         out.timing_ms = dict(getattr(out, "timing_ms", {}) or {})
-        out.timing_ms.update({"emergency_cls_conf": emg_conf, "emergency_cls_name": emg_name})
+        out.timing_ms.update({
+            "emergency_cls_conf": emg_conf,
+            "emergency_cls_name": emg_name,
+            "emergency_threshold": float(st.session_state.get("emergency_threshold", DEFAULT_EMERGENCY_THRESHOLD)),
+        })
     except Exception:
         pass
 
@@ -1100,18 +1252,6 @@ if st.session_state.mode == "Użytkownik":
                 st.markdown("<div class='previewLabel'>Podgląd wybranego zdjęcia</div>", unsafe_allow_html=True)
                 st.image(st.session_state.upload_image_rgb, width=420)
                 st.markdown("</div>", unsafe_allow_html=True)
-
-                btns = st.columns([1, 1], gap="small")
-                with btns[0]:
-                    if st.button("Uruchom analizę", use_container_width=True):
-                        run_pipeline_on_rgb(st.session_state.upload_image_rgb)
-                        st.rerun()
-                with btns[1]:
-                    if st.button("Wybierz inne zdjęcie", use_container_width=True):
-                        st.session_state.upload_image_rgb = None
-                        st.session_state.uploader_key += 1
-                        st.session_state.analysis_just_finished = False
-                        st.rerun()
             else:
                 uploaded = st.file_uploader(
                     "Wgraj zdjęcie (JPG/PNG)",
@@ -1129,10 +1269,12 @@ if st.session_state.mode == "Użytkownik":
             test_dir = Path("data/test_images")
             if not test_dir.exists():
                 st.info("Brak folderu data/test_images.")
+                prev_rgb = None
             else:
                 imgs = sorted([p for p in test_dir.iterdir() if p.suffix.lower() in [".jpg", ".jpeg", ".png"]])
                 if not imgs:
                     st.info("Brak obrazów w data/test_images.")
+                    prev_rgb = None
                 else:
                     pick = st.selectbox("Wybierz testowy obraz", [p.name for p in imgs], index=0)
                     p = test_dir / pick
@@ -1148,12 +1290,8 @@ if st.session_state.mode == "Użytkownik":
                         st.warning(f"Nie udało się wczytać podglądu: {e}")
                         prev_rgb = None
 
-                    if st.button("Uruchom analizę testu", use_container_width=True):
-                        if prev_rgb is None:
-                            st.error("Brak obrazu testowego do analizy.")
-                        else:
-                            run_pipeline_on_rgb(prev_rgb)
-                            st.rerun()
+            # USUNIĘTE: przycisk analizy testu spod zdjęcia
+            # (analiza testu jest teraz po prawej, pod bramą, jako szerszy przycisk)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1181,7 +1319,6 @@ if st.session_state.mode == "Użytkownik":
                 animate=bool(st.session_state.analysis_just_finished),
             )
 
-            # FAB (JS jest wstrzyknięty przez components.html i działa na parent DOM)
             st.markdown(
                 _html_noindent(
                     """
@@ -1199,6 +1336,35 @@ if st.session_state.mode == "Użytkownik":
                 ),
                 unsafe_allow_html=True,
             )
+
+        # =========================================================
+        # PRZYCISKI POD BRAMĄ:
+        # - jeśli jest upload -> dwa wierszowe (Uruchom analizę + Wybierz inne)
+        # - jeśli brak upload, ale jest test -> jeden szeroki (Uruchom analizę testu)
+        # =========================================================
+
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+        has_upload = st.session_state.upload_image_rgb is not None
+        has_test_prev = "prev_rgb" in locals() and locals().get("prev_rgb") is not None
+
+        if has_upload:
+            btns = st.columns([1, 1], gap="small")
+            with btns[0]:
+                if st.button("Uruchom analizę", key="run_analysis_under_gate", use_container_width=True):
+                    run_pipeline_on_rgb(st.session_state.upload_image_rgb)
+                    st.rerun()
+            with btns[1]:
+                if st.button("Wybierz inne zdjęcie", key="pick_other_under_gate", use_container_width=True):
+                    st.session_state.upload_image_rgb = None
+                    st.session_state.uploader_key += 1
+                    st.session_state.analysis_just_finished = False
+                    st.rerun()
+        elif has_test_prev:
+            # szerszy przycisk – bo nie ma drugiego obok
+            if st.button("Uruchom analizę testu", key="run_test_under_gate", use_container_width=True):
+                run_pipeline_on_rgb(locals()["prev_rgb"])
+                st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
 

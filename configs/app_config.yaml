@@ -1,24 +1,31 @@
 detector:
-  # heuristic = działa bez trenowania (demo/synthetic)
-  # yolo      = docelowo po treningu na Kaggle
   type: "yolo"
 
-  # --- heuristic params ---
   min_area_ratio: 0.002
   max_area_ratio: 0.20
   aspect_min: 2.0
   aspect_max: 6.5
 
-  # --- yolo params (używane gdy type=yolo) ---
-  weights: "runs/detect/plate/weights/best.pt"   # podmień po treningu
+  weights: "runs/detect/plate/weights/best.pt"
   conf: 0.25
   iou: 0.45
   img_size: 640
 
 ocr:
-  engine: "easyocr"   # easyocr | tesseract
-  languages: ["en"]   # dla easyocr (pierwsze uruchomienie pobierze modele)
+  # easyocr | tesseract | tesseract_fast
+  engine: "easyocr"
+  languages: ["en"]
   tesseract_lang: "eng"
+
+  fast:
+    cut_blue_auto: false
+    resize_fx: 2.1
+    oem: 3
+
+# KLUCZ: crop jak w demo (tight bbox)
+crop:
+  pad_x_ratio: 0.0
+  pad_y_ratio: 0.0
 
 postprocess:
   uppercase: true
