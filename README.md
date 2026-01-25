@@ -27,10 +27,11 @@ Projekt realizuje kompletny „flow bramy”:
 
 ### Instalacja
 ```bash
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
+python -m venv .venv
+# Windows: .venv\Scripts\activate
 source .venv/bin/activate
+
+pip install -r requirements.txt
 ```
 
 > Jeśli instalujesz `easyocr` / `ultralytics` i środowisko nie dobierze automatycznie PyTorch,
