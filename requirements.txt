@@ -18,3 +18,5 @@ pytesseract>=0.3.10
 # Metrics
 scikit-learn>=1.3
 kaggle
+
+psycopg2-binary

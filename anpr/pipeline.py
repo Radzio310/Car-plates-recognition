@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional
 import time
 
 import cv2
@@ -67,8 +67,12 @@ class ANPRPipeline:
         self.strip_spaces = bool(pp.get("strip_spaces", True))
         self.plate_regex = pp.get("plate_regex", "^[A-Z]{1,3}[A-Z0-9]{4,5}$")
 
-        db_path = cfg.get("access_control", {}).get("sqlite_path", "data/plates.db")
-        self.db = PlateDB(path=db_path)
+        db_cfg = cfg.get("access_control", {})
+        self.db = PlateDB(
+            host=db_cfg.get("host", "localhost"),
+            database=db_cfg.get("database", "anpr_db"),
+            user=db_cfg.get("user", "user"),
+            password=db_cfg.get("password", "password123"))
 
         # Padding bbox (żeby OCR nie tracił pierwszych znaków)
         pad_cfg = cfg.get("crop", {})

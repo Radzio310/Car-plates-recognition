@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import io
-import os
 import re
 import sys
-import sqlite3
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -22,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from anpr.pipeline import ANPRPipeline
 from anpr.utils import normalize_plate, validate_plate
+from anpr.db import PlateDB
 
 EMERGENCY_MODEL_PATH = Path("runs/train/emergency_classification_v2/weights/best.pt")
 EMERGENCY_THRESHOLD = 0.60  # możesz zmienić
@@ -454,21 +453,21 @@ def predict_emergency_on_rgb(img_rgb: np.ndarray) -> tuple[bool, float, str]:
 def load_pipeline_cached(config_path: str) -> ANPRPipeline:
     return ANPRPipeline(config_path=config_path)
 
-def get_db_path_from_config(cfg_path: str) -> str:
+def get_db_config(cfg_path: str) -> dict:
     import yaml
-    p = Path(cfg_path)
-    if not p.exists():
-        return "data/plates.db"
-    with open(p, "r", encoding="utf-8") as f:
+    with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    return str(cfg.get("access_control", {}).get("sqlite_path", "data/plates.db"))
+    return cfg.get("access_control", {})
 
-def _ensure_db_dir(db_path: str) -> None:
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-
-def _sqlite_conn(db_path: str) -> sqlite3.Connection:
-    _ensure_db_dir(db_path)
-    return sqlite3.connect(db_path, check_same_thread=False)
+def get_db_instance(cfg_path: str) -> PlateDB:
+    conf = get_db_config(cfg_path)
+    return PlateDB(
+        host=conf.get("host", "localhost"),
+        database=conf.get("database", "anpr_db"),
+        user=conf.get("user", "user"),
+        password=conf.get("password", "password123"),
+        port=int(conf.get("port", 5432))
+    )
 
 def _run_db_manage(args: List[str], db_path: Optional[str] = None) -> subprocess.CompletedProcess:
     """
@@ -487,8 +486,8 @@ def _run_db_manage(args: List[str], db_path: Optional[str] = None) -> subprocess
 
     return subprocess.run(base + args, cwd=str(ROOT), capture_output=True, text=True)
 
-def db_add_plate(db_path: str, plate_norm: str) -> None:
-    p = _run_db_manage(["add", "--plate", plate_norm], db_path=db_path)
+def db_add_plate(plate_norm: str) -> None:
+    p = subprocess.run([sys.executable, "-m", "scripts.db_manage", "add", "--plate", plate_norm], cwd=str(ROOT))
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout or "").strip() or "db_manage add failed")
 
@@ -497,111 +496,23 @@ def _looks_like_plate(s: str) -> bool:
     s = re.sub(r"[^A-Z0-9]", "", s)
     return 4 <= len(s) <= 10
 
-def _pick_best_table_and_col(conn: sqlite3.Connection, plate_regex: str) -> Optional[Tuple[str, str]]:
-    """
-    Heurystyka do listowania z bazy (działa dla różnych schematów):
-    - szukamy tekstowych kolumn,
-    - punktujemy ile wartości wygląda jak tablica i/lub pasuje do regex.
-    """
-    cur = conn.cursor()
-    tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()]
-    if not tables:
-        return None
-
-    rx = re.compile(plate_regex)
-    best: Optional[Tuple[str, str]] = None
-    best_score = -1
-
-    for t in tables:
-        try:
-            cols = cur.execute(f"PRAGMA table_info({t})").fetchall()
-        except Exception:
-            continue
-
-        for (_, colname, coltype, *_rest) in cols:
-            ctype = (coltype or "").upper()
-            if not any(x in ctype for x in ["CHAR", "TEXT", "CLOB", "VARCHAR"]):
-                continue
-
-            try:
-                rows = cur.execute(f"SELECT {colname} FROM {t} WHERE {colname} IS NOT NULL LIMIT 500").fetchall()
-            except Exception:
-                continue
-
-            if not rows:
-                continue
-
-            looks = 0
-            matches = 0
-            for (v,) in rows:
-                s = str(v).strip().upper()
-                s2 = re.sub(r"[^A-Z0-9]", "", s)
-                if _looks_like_plate(s2):
-                    looks += 1
-                if s2 and rx.match(s2):
-                    matches += 1
-
-            score = matches * 10 + looks
-            if score > best_score:
-                best_score = score
-                best = (t, colname)
-
-    return best
-
-def db_list_plates(
-    db_path: str,
-    plate_regex: str,
-    allowed_chars: str,
-    uppercase: bool,
-    strip_spaces: bool,
-) -> List[str]:
-    conn = _sqlite_conn(db_path)
-    pick = _pick_best_table_and_col(conn, plate_regex)
-    if not pick:
-        conn.close()
-        return []
-
-    table, col = pick
-    cur = conn.cursor()
+def db_list_plates(cfg_path: str) -> List[str]:
     try:
-        rows = cur.execute(f"SELECT {col} FROM {table}").fetchall()
-    except Exception:
-        conn.close()
+        db = get_db_instance(cfg_path)
+        return db.list()
+    except Exception as e:
+        st.error(f"Błąd listowania bazy: {e}")
         return []
 
-    conn.close()
-
-    out: List[str] = []
-    for (v,) in rows:
-        if v is None:
-            continue
-        norm = normalize_plate(str(v), allowed_chars=allowed_chars, uppercase=uppercase, strip_spaces=strip_spaces)
-        if norm:
-            out.append(norm)
-
-    return sorted(set(out))
-
-def db_remove_plate(db_path: str, plate_norm: str, plate_regex: str) -> None:
-    """
-    1) próbujemy db_manage remove/del/rm
-    2) fallback: usuń z wykrytej tabeli (dla nietypowych schematów)
-    """
-    for cmd in (["remove"], ["del"], ["rm"]):
-        p = _run_db_manage(cmd + ["--plate", plate_norm], db_path=db_path)
-        if p.returncode == 0:
-            return
-
-    conn = _sqlite_conn(db_path)
-    pick = _pick_best_table_and_col(conn, plate_regex)
-    if not pick:
-        conn.close()
-        raise RuntimeError("Nie potrafię wykryć tabeli z tablicami w tej bazie.")
-
-    table, col = pick
-    cur = conn.cursor()
-    cur.execute(f"DELETE FROM {table} WHERE UPPER({col}) = ?", (plate_norm.upper(),))
-    conn.commit()
-    conn.close()
+def db_remove_plate(cfg_path: str, plate_norm: str) -> None:
+    db = get_db_instance(cfg_path)
+    try:
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM trusted_plates WHERE plate = %s", (plate_norm,))
+            conn.commit()
+    except Exception as e:
+        raise RuntimeError(f"Błąd usuwania: {e}")
 
 
 # =========================================================
@@ -826,8 +737,6 @@ with st.sidebar:
     st.markdown("</div>", unsafe_allow_html=True)
 
 cfg_path = st.session_state.cfg_path
-db_path = get_db_path_from_config(cfg_path)
-
 
 # =========================================================
 # LOAD PIPELINE
@@ -1198,7 +1107,7 @@ else:
             else:
                 try:
                     with fullscreen_loader("Zapisuję do bazy…", "Dodaję numer do listy zaufanych."):
-                        db_add_plate(db_path, norm)
+                        db_add_plate(norm)
                     st.session_state.admin_recent_add = norm
                     st.success(f"Dodano: {norm}")
                     st.rerun()
@@ -1213,13 +1122,7 @@ else:
         st.markdown("<div class='subtle'>Kliknij „Usuń”, aby natychmiast zdjąć numer z listy.</div>", unsafe_allow_html=True)
         st.markdown("<div class='hrSoft'></div>", unsafe_allow_html=True)
 
-        plates = db_list_plates(
-            db_path=db_path,
-            plate_regex=plate_regex,
-            allowed_chars=allowed_chars,
-            uppercase=uppercase,
-            strip_spaces=strip_spaces,
-        )
+        plates = db_list_plates(cfg_path)
 
         if not plates:
             st.info("Lista jest pusta albo nie udało się wykryć tabeli z tablicami w tej bazie.")
@@ -1254,7 +1157,7 @@ else:
                         if st.button("Usuń", key=f"del_{p}_{r_i}_{c_i}", use_container_width=True):
                             try:
                                 with fullscreen_loader("Aktualizuję bazę…", "Usuwam numer z listy zaufanych."):
-                                    db_remove_plate(db_path=db_path, plate_norm=p, plate_regex=plate_regex)
+                                    db_remove_plate(cfg_path, p)
                                 if st.session_state.admin_recent_add == p:
                                     st.session_state.admin_recent_add = ""
                                 st.success(f"Usunięto: {p}")
