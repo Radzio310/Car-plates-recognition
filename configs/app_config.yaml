@@ -27,4 +27,8 @@ postprocess:
   plate_regex: "^[A-Z]{1,3}[A-Z0-9]{4,5}$"
 
 access_control:
-  sqlite_path: "data/plates.db"
+  host: "127.0.0.1"
+  port: 5432
+  user: "user"
+  password: "password123"
+  database: "anpr_db"
