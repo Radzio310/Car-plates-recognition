@@ -158,7 +158,7 @@ Wynik: `best.pt` w katalogu treningowym (zależnie od ustawień Ultralytics – 
 
 ### 6.4 Ewaluacja na walidacji
 ```bash
-python scripts/08_evaluate_emergency_classes.py
+python scripts/08_evaluate_emergency_cls.py
 ```
 
 Skrypt liczy accuracy na `val/` dla progowania predykcji (próg ustawiony w skrypcie).

@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 def evaluate_test_set():
     # 1. Paths
-    model_path = Path("runs/train/emergency_classification_v2/weights/best.pt")
+    model_path = Path("runs/classify/runs/train/emergency_classification_v2/weights/best.pt")
     test_images_dir = Path("data/emergency_vehicles/Emergency_Vehicles/test")
     gt_csv = Path("data/emergency_vehicles/Emergency_Vehicles/ground_truth.csv")
     output_csv = Path("data/emergency_vehicles/Emergency_Vehicles/test_predictions.csv")
