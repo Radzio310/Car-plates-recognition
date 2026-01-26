@@ -19,7 +19,7 @@ def main():
         imgsz=args.imgsz,
         batch=args.batch,
         device=args.device,
-        project="runs/detect",
+        project="runs",
         name="plate",
     )
 

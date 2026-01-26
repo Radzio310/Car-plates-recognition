@@ -41,7 +41,8 @@ def main():
         return
 
     # TRYB KAGGLE (jeśli kiedyś wrócisz)
-    cmd = [sys.executable, "-m", "kaggle", "datasets", "download", "-d", args.dataset, "-p", str(out)]
+    cmd = ["kaggle", "datasets", "download", "-d", "piotrstefaskiue/poland-vehicle-license-plate-dataset", "-p",
+           "data/kaggle_raw"]
     if args.force:
         cmd.append("--force")
     print("Running:", " ".join(cmd))

@@ -27,10 +27,11 @@ Projekt realizuje kompletny „flow bramy”:
 
 ### Instalacja
 ```bash
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
+python -m venv .venv
+# Windows: .venv\Scripts\activate
 source .venv/bin/activate
+
+pip install -r requirements.txt
 ```
 
 > Jeśli instalujesz `easyocr` / `ultralytics` i środowisko nie dobierze automatycznie PyTorch,
@@ -107,7 +108,7 @@ python scripts/03_evaluate.py \
   --images data/yolo/images/test \
   --labels data/yolo/labels/test \
   --gt-csv data/kaggle_raw/ground_truth.csv \
-  --weights runs/detect/train/weights/best.pt \
+  --weights runs/detect/plate/weights/best.pt \
   --limit 100
 ```
 
